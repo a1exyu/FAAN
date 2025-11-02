@@ -5,6 +5,7 @@ from args import read_options
 from data_loader import *
 from matcher import *
 from tensorboardX import SummaryWriter
+import json
 import os
 from tqdm import tqdm
 
@@ -271,6 +272,7 @@ class Trainer(object):
         hits5 = []
         hits1 = []
         mrr = []
+        task_logs = []
         for query_ in test_tasks.keys():
             hits10_ = []
             hits5_ = []
@@ -279,6 +281,12 @@ class Trainer(object):
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[triple[0]], symbol2id[triple[2]]] for triple in support_triples]
+
+            task_log = {
+                'task': query_,
+                'support_triples': support_triples,
+                'queries': []
+            }
 
             if meta:
                 support_left = [self.ent2id[triple[0]] for triple in support_triples]
@@ -296,9 +304,11 @@ class Trainer(object):
                     query_right = []
                     query_left.append(self.ent2id[triple[0]])
                     query_right.append(self.ent2id[triple[2]])
+                candidate_entities = [true]
                 for ent in candidates:
                     if (ent not in self.e1rel_e2[triple[0] + triple[1]]) and ent != true:
                         query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
+                        candidate_entities.append(ent)
                         if meta:
                             query_left.append(self.ent2id[triple[0]])
                             query_right.append(self.ent2id[ent])
@@ -310,6 +320,13 @@ class Trainer(object):
                     scores, _ = self.Matcher(support, query, None, isEval=True,
                                              support_meta=support_meta,
                                              query_meta=query_meta,
+                                             false_meta=None)
+                    scores.detach()
+                    scores = scores.data
+                else:
+                    scores, _ = self.Matcher(support, query, None, isEval=True,
+                                             support_meta=None,
+                                             query_meta=None,
                                              false_meta=None)
                     scores.detach()
                     scores = scores.data
@@ -338,6 +355,18 @@ class Trainer(object):
                 mrr.append(1.0 / rank)
                 mrr_.append(1.0 / rank)
 
+                exp_scores = np.exp(scores - np.max(scores))
+                probs = exp_scores / np.sum(exp_scores)
+                entropy = float(-(probs * (np.log(probs + 1e-12))).sum())
+
+                task_log['queries'].append({
+                    'query_triple': triple,
+                    'candidate_entities': candidate_entities,
+                    'scores': [float(score) for score in scores.tolist()],
+                    'entropy': entropy,
+                    'rank': rank
+                })
+
             logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f}, MRR:{:.3f}'.format(query_,
                                                                                                np.mean(
                                                                                                    hits10_),
@@ -346,6 +375,13 @@ class Trainer(object):
                                                                                                np.mean(mrr_),
                                                                                                ))
             logging.info('Number of candidates: {}, number of test examples {}'.format(len(candidates), len(hits10_)))
+            task_logs.append(task_log)
+        if task_logs:
+            os.makedirs('logs_', exist_ok=True)
+            score_log_path = os.path.join('logs_', f'{self.prefix}_{mode}_scores.json')
+            with open(score_log_path, 'w') as score_file:
+                json.dump(task_logs, score_file, ensure_ascii=False, indent=2)
+            logging.info('Saved evaluation scores with entropy to %s', score_log_path)
         logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
         logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
         logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
